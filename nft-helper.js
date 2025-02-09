@@ -26,6 +26,7 @@ cfg = {
     monitor: {
         reconnect: 5,          // stable connection duration in seconds
         lan: {
+            enable: false,           // enable LAN ip address monitoring
             interval: 0,
             samples: 6,
             delay: 1000,
@@ -62,9 +63,18 @@ script = {
             let gateway = state.gateways[x], config = cfg.gateways[x], lostLan = 0, lostLanPercent = 0, averageLan = 0, averageLanCalc = 0,
                 lostWan = 0, lostWanPercent = 0, averageWan = 0, wanTotalSamples = cfg.monitor.wan.samples * cfg.monitor.wan.targets.length
                 , averageWanTally = wanTotalSamples, averageWanCalc = 0;
-            if (state.gateways[cfg.gateways.length - 1].sampleLAN.length == cfg.monitor.lan.samples
-                && gateway.sampleWAN[cfg.monitor.wan.targets.length - 1].length == cfg.monitor.wan.samples) {
-                if (x == cfg.gateways.length - 1 && state.boot == false) state.boot = true;
+            if (cfg.monitor.lan.enable == true) {
+                if (state.gateways[cfg.gateways.length - 1].sampleLAN.length == cfg.monitor.lan.samples) {
+                    if (gateway.sampleWAN[cfg.monitor.wan.targets.length - 1].length == cfg.monitor.wan.samples) start();
+                }
+            } else if (gateway.sampleWAN[cfg.monitor.wan.targets.length - 1].length == cfg.monitor.wan.samples) start();
+            function start() {
+                if (state.boot == false) {
+                    if (x == cfg.gateways.length - 1) state.boot = true;
+                    return;
+                } else discover();
+            }
+            function discover() {
                 for (let y = 0; y < cfg.monitor.lan.samples; y++) {
                     if (gateway.sampleLAN[y] === false) lostLan++;
                     else averageLan += gateway.sampleLAN[y];
@@ -96,21 +106,24 @@ script = {
                 else if (averageWanCalc >= cfg.monitor.wan.latencyError) { gateway.status = "offline-WAN latency"; gateway.offline = true; }
                 else if (cfg.monitor.wan.latencyWarn != undefined && averageWanCalc >= cfg.monitor.wan.latencyWarn) gateway.status = "degraded-WAN latency";
                 else gateway.status = "online";
+                report();
+            }
+            function report() {
                 if (gateway.statusPrevious != gateway.status) {
                     if (gateway.statusPrevious == "online") gateway.timer = time.epoch;
                     if (gateway.status == "online" && gateway.statusPrevious != undefined) {
                         if (time.epoch - gateway.timer >= (cfg.monitor.reconnect)) {
-                            console.log("gateway: " + config.name + " is " + gateway.status + "  -  LAN average:" + averageLanCalc
-                                + " LAN loss: " + lostLanPercent + "%  WAN Average: " + averageWanCalc + " WAN Loss: "
+                            console.log("gateway: " + config.name + " is " + gateway.status + "  -  " + (cfg.monitor.lan.enable ? "LAN average: " + averageLanCalc
+                                + " LAN loss: " + lostLanPercent + "%, " : "") + "WAN Average: " + averageWanCalc + " WAN Loss: "
                                 + lostWanPercent + "%" + ((gateway.statusPrevious.includes("offline")) ? "  - Was offline for " : "  - Was degraded for ")
                                 + (time.epoch - gateway.timer) + " seconds");
                         }
                     } else {
-                        console.log("gateway: " + config.name + " is " + gateway.status + "  -  LAN average:" + averageLanCalc
-                            + " LAN loss: " + lostLanPercent + "%  WAN Average: " + averageWanCalc + " WAN Loss: " + lostWanPercent + "%");
+                        console.log("gateway: " + config.name + " is " + gateway.status + "  -  " + (cfg.monitor.lan.enable ? "LAN average:" + averageLanCalc
+                            + " LAN loss: " + lostLanPercent + "%, " : "") + "WAN Average: " + averageWanCalc + " WAN Loss: " + lostWanPercent + "%");
                     }
-                    if (gateway.status.includes("online") && gateway.offline == true | gateway.statusPrevious != undefined
-                        | gateway.status.includes("offline")) {
+                    if (gateway.status.includes("online") && gateway.offline == true || gateway.statusPrevious == undefined
+                        || gateway.status.includes("offline")) {
                         if (gateway.status == "online") gateway.offline = false;
                         clearTimeout(state.nfTables.timer);
                         state.nfTables.timer = setTimeout(() => { script.nft(); }, 3e3);
@@ -118,6 +131,7 @@ script = {
                     gateway.statusPrevious = gateway.status;
                 }
             }
+
         }
     },
     pingLan: function () {
@@ -174,65 +188,63 @@ script = {
     },
     nft: function () {
         let sequence = [], order = " map { ";
-        if (state.boot == true) {
-            state.nfTables.data = fs.readFileSync('/etc/nftables.conf', 'utf-8').split(/\r?\n/);
-            switch (cfg.network.type) {
-                case "failover":
-                    switch (ColorMode.network.manager) {
-                        case "netplan":
-                            state.nfTables.data = fs.readFileSync('/etc/netplan/10-dhcp-all-interfaces.yaml', 'utf-8').split(/\r?\n/);
-                            for (let x = 0; x < state.nfTables.data.length; x++) {
-                                if (state.nfTables.data[x].includes("via: ")) {
-                                    console.log("gateway found in netplan config, line: " + x);
-                                    state.nfTables.line = x;
-                                    break;
-                                }
+        state.nfTables.data = fs.readFileSync('/etc/nftables.conf', 'utf-8').split(/\r?\n/);
+        switch (cfg.network.type) {
+            case "failover":
+                switch (ColorMode.network.manager) {
+                    case "netplan":
+                        state.nfTables.data = fs.readFileSync('/etc/netplan/10-dhcp-all-interfaces.yaml', 'utf-8').split(/\r?\n/);
+                        for (let x = 0; x < state.nfTables.data.length; x++) {
+                            if (state.nfTables.data[x].includes("via: ")) {
+                                console.log("gateway found in netplan config, line: " + x);
+                                state.nfTables.line = x;
+                                break;
                             }
+                        }
 
-                            break;
+                        break;
+                }
+                break;
+            case "teaming":
+                state.nfTables.total = 0;
+                for (let x = 0; x < state.gateways.length; x++) {
+                    //   console.log(state.gateways[x].status)
+                    if (state.gateways[x].status == undefined || state.gateways[x].status.includes("offline") == false) sequence.push(x);
+                }
+                for (let x = 0; x < state.nfTables.data.length; x++) {
+                    if (state.nfTables.data[x].includes(cfg.nft.command[0])) {
+                        //  console.log("nft command found on line: " + x);
+                        state.nfTables.line = x;
+                        break;
                     }
-                    break;
-                case "teaming":
-                    state.nfTables.total = 0;
-                    for (let x = 0; x < state.gateways.length; x++) {
-                        //   console.log(state.gateways[x].status)
-                        if (state.gateways[x].status == undefined || state.gateways[x].status.includes("offline") == false) sequence.push(x);
-                    }
-                    for (let x = 0; x < state.nfTables.data.length; x++) {
-                        if (state.nfTables.data[x].includes(cfg.nft.command[0])) {
-                            //  console.log("nft command found on line: " + x);
-                            state.nfTables.line = x;
-                            break;
+                }
+                if (state.nfTables.line != null) {
+                    if (cfg.network.weighted == true) {
+                        let weights = script.calcWeight(sequence);
+                        let weightStart = 0, weightEnd = weights[0];
+                        for (let x = 0; x < sequence.length; x++) {
+                            order += (weightStart) + "-" + (weightEnd) + " : " + (sequence[x] + 1) + (x < (sequence.length - 1) ? ", " : " }");
+                            weightStart += weights[x] + (x == 0 ? 1 : 0);
+                            weightEnd += weights[x];
                         }
+                        //  console.log("modifying nftables.conf");
+                        state.nfTables.data[state.nfTables.line] = "\t" + cfg.nft.command[0] + " random mod 100 " + order;
+                    } else {
+                        for (let x = 0; x < sequence.length; x++)
+                            order += x + " : " + (sequence[x] + 1) + (x < (sequence.length - 1) ? ", " : " }");
+                        //  console.log("modifying nftables.conf");
+                        state.nfTables.data[state.nfTables.line] = "\t" + cfg.nft.command[0] + " inc mod " + sequence.length + order;
                     }
-                    if (state.nfTables.line != null) {
-                        if (cfg.network.weighted == true) {
-                            let weights = script.calcWeight(sequence);
-                            let weightStart = 0, weightEnd = weights[0];
-                            for (let x = 0; x < sequence.length; x++) {
-                                order += (weightStart) + "-" + (weightEnd) + " : " + (sequence[x] + 1) + (x < (sequence.length - 1) ? ", " : " }");
-                                weightStart += weights[x] + (x == 0 ? 1 : 0);
-                                weightEnd += weights[x];
-                            }
-                            //  console.log("modifying nftables.conf");
-                            state.nfTables.data[state.nfTables.line] = "\t" + cfg.nft.command[0] + " random mod 100 " + order;
-                        } else {
-                            for (let x = 0; x < sequence.length; x++)
-                                order += x + " : " + (sequence[x] + 1) + (x < (sequence.length - 1) ? ", " : " }");
-                            //  console.log("modifying nftables.conf");
-                            state.nfTables.data[state.nfTables.line] = "\t" + cfg.nft.command[0] + " inc mod " + sequence.length + order;
-                        }
-                    } else console.log("error, nftables doesnt have referenced command");
-                    break;
-            }
-            if (state.nfTables.line != null) {
-                //  console.log(state.nfTables.data);
-                //   console.log("saving new nftables.conf");
-                fs.writeFileSync('/etc/nftables.tmp', state.nfTables.data.join('\n'), 'utf-8');
-                cp.execSync("cp /etc/nftables.tmp /etc/nftables.conf");
-                console.log("updating nftables");
-                cp.execSync("nft -f /etc/nftables.conf");
-            }
+                } else console.log("error, nftables doesnt have referenced command");
+                break;
+        }
+        if (state.nfTables.line != null) {
+            //  console.log(state.nfTables.data);
+            //   console.log("saving new nftables.conf");
+            fs.writeFileSync('/etc/nftables.tmp', state.nfTables.data.join('\n'), 'utf-8');
+            cp.execSync("cp /etc/nftables.tmp /etc/nftables.conf");
+            console.log("updating nftables");
+            cp.execSync("nft -f /etc/nftables.conf");
         }
     },
     checkRoutes: function () {
@@ -322,7 +334,7 @@ sys = {
             fs.writeFileSync(path.app + "router-nv.json", JSON.stringify(nv));
         }
             */
-        script.pingLan();
+        if (cfg.monitor.lan.enable == true) script.pingLan();
         setTimeout(() => { script.pingWanRound(); }, 500);
         setInterval(() => { script.gatewayMonitor(); }, 1e3);
     },
@@ -331,6 +343,7 @@ sys = {
         nv = {};
         state = {
             boot: false,
+            startDelay: 5000,
             sampleLAN: 0,
             sampleWAN: 0,
             spawn: [],
